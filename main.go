@@ -84,8 +84,14 @@ func tailJournal(logger *syslog.Logger, t *template.Template) {
 
 		data := JournalMessage{}
 		err = json.Unmarshal(line, &data)
+		if err != nil {
+			logger.Errors <- err
+		}
 		buf := new(bytes.Buffer)
 		err = t.Execute(buf, data)
+		if err != nil {
+			logger.Errors <- err
+		}
 
 		logger.Packets <- syslog.Packet{
 			Severity: data.Priority,
@@ -106,10 +112,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("Critical Error: %s", err)
 	}
+
 	t := template.New("Format")
 	t, err = t.Parse(format)
 	if err != nil {
 		log.Fatalf("Critical Error: %s", err)
 	}
+
 	tailJournal(logger, t)
+
+	for err = range logger.Errors {
+		log.Printf("Syslog error: %v", err)
+	}
 }
