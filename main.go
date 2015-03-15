@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"text/template"
 	"time"
 )
@@ -22,6 +23,8 @@ var useTcp bool
 var format string
 var useColor bool
 var protocol = "udp"
+var exclude string
+var excludeList []string
 
 const (
 	FMT_COLOR = "\033[1;33;40mPID\033[0m: {{.PID}}; \033[1;33;40mUnit\033[0m: {{.Unit}}; \033[1;33;40mImage\033[0m: {{.Exe}}; \033[1;33;40mMessage\033[0m: {{.Message}}"
@@ -34,6 +37,7 @@ func init() {
 	flag.StringVar(&format, "format", FMT_PLAIN, "Format for the message")
 	flag.BoolVar(&useColor, "color", false, "Use the default formatter with ANSI colors")
 	flag.BoolVar(&useTcp, "useTcp", false, "Forward logs over tcp?")
+	flag.StringVar(&exclude, "exclude", "", "A comma seperated list of processes to ignore. Example \"docker,sudo\" ")
 	flag.Parse()
 	if useTcp {
 		protocol = "tcp"
@@ -51,23 +55,33 @@ func init() {
 		flag.Usage()
 		os.Exit(1)
 	}
+	excludeList = strings.Split(exclude, ",")
 }
 
 type JournalMessage struct {
-	Message   string          `json:"MESSAGE"`
-	Priority  syslog.Priority `json:"PRIORITY"`
-	Facility  syslog.Priority `json:"SYSLOG_FACILITY"`
-	Tag       string          `json:"SYSLOG_IDENTIFIER"`
-	BootId    string          `json:"_BOOT_ID"`
-	Exe       string          `json:"_EXE"`
-	Gid       int64           `json:"_GID"`
-	HostName  string          `json:"_HOSTNAME"`
-	MachineId string          `json:"_MACHINE_ID"`
-	PID       int64           `json:"_PID"`
-	Unit      string          `json:"_SYSTEMD_UNIT"`
-	Transport string          `json:"_TRANSPORT"`
-	UID       string          `json:"_UID"`
-	Timestamp int64           `json:"__REALTIME_TIMESTAMP"`
+	Message   string `json:"MESSAGE"`
+	Priority  string `json:"PRIORITY"`
+	Facility  string `json:"SYSLOG_FACILITY"`
+	Tag       string `json:"_COMM"`
+	BootId    string `json:"_BOOT_ID"`
+	Exe       string `json:"_EXE"`
+	Gid       string `json:"_GID"`
+	HostName  string `json:"_HOSTNAME"`
+	MachineId string `json:"_MACHINE_ID"`
+	PID       string `json:"_PID"`
+	Unit      string `json:"_SYSTEMD_UNIT"`
+	Transport string `json:"_TRANSPORT"`
+	UID       string `json:"_UID"`
+	Timestamp string `json:"__REALTIME_TIMESTAMP"`
+}
+
+func shouldSend(m *JournalMessage) bool {
+	for _, i := range excludeList {
+		if m.Tag == i {
+			return false
+		}
+	}
+	return true
 }
 
 func tailJournal(logger *syslog.Logger, t *template.Template) {
@@ -86,20 +100,39 @@ func tailJournal(logger *syslog.Logger, t *template.Template) {
 		err = json.Unmarshal(line, &data)
 		if err != nil {
 			logger.Errors <- err
-		}
-		buf := new(bytes.Buffer)
-		err = t.Execute(buf, data)
-		if err != nil {
-			logger.Errors <- err
+			continue
 		}
 
-		logger.Packets <- syslog.Packet{
-			Severity: data.Priority,
-			Facility: data.Facility,
-			Time:     time.Unix(data.Timestamp, 0),
-			Hostname: data.HostName,
-			Tag:      data.Tag,
-			Message:  buf.String(),
+		if shouldSend(&data) {
+			buf := new(bytes.Buffer)
+			err = t.Execute(buf, data)
+			if err != nil {
+				logger.Errors <- err
+				continue
+			}
+			facility, err := strconv.ParseInt(data.Facility, 0, 64)
+			if err != nil {
+				logger.Errors <- err
+				continue
+			}
+			priority, err := strconv.ParseInt(data.Priority, 0, 64)
+			if err != nil {
+				logger.Errors <- err
+				continue
+			}
+			timestamp, err := strconv.ParseInt(data.Timestamp, 0, 64)
+			if err != nil {
+				logger.Errors <- err
+				continue
+			}
+			logger.Packets <- syslog.Packet{
+				Severity: syslog.Priority(priority),
+				Facility: syslog.Priority(facility),
+				Time:     time.Unix(timestamp/1000000, 0).UTC(),
+				Hostname: data.HostName,
+				Tag:      data.Tag,
+				Message:  buf.String(),
+			}
 		}
 	}
 }
@@ -119,7 +152,7 @@ func main() {
 		log.Fatalf("Critical Error: %s", err)
 	}
 
-	tailJournal(logger, t)
+	go tailJournal(logger, t)
 
 	for err = range logger.Errors {
 		log.Printf("Syslog error: %v", err)
