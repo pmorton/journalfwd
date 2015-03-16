@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"text/template"
@@ -84,13 +85,39 @@ func shouldSend(m *JournalMessage) bool {
 	return true
 }
 
-func tailJournal(logger *syslog.Logger, t *template.Template) {
-	reader := bufio.NewReader(os.Stdin)
+func systemJournalBuffer() *bufio.Reader {
+	c := exec.Command("/usr/bin/journalctl", "--system", "-f", "-o", "json")
+	stdout, err := c.StdoutPipe()
+	if err != nil {
+		log.Fatalf("Failed to get stdout %s", err)
+	}
+	err = c.Start()
+	if err != nil {
+		log.Fatalf("Failed to start system tail %s", err)
+	}
+	return bufio.NewReader(stdout)
+}
+
+func dmesgJournalBuffer() *bufio.Reader {
+	c := exec.Command("/usr/bin/journalctl", "--system", "-f", "-k", "-o", "json")
+	stdout, err := c.StdoutPipe()
+	if err != nil {
+		log.Fatalf("Failed to get stdout %s", err)
+	}
+	err = c.Start()
+	if err != nil {
+		log.Fatalf("Failed to start dmesg tail %s", err)
+	}
+	return bufio.NewReader(stdout)
+}
+
+func pumpBuffer(logger *syslog.Logger, t *template.Template, reader *bufio.Reader) {
 	for {
 		line, err := reader.ReadBytes('\n')
 
 		if err != nil {
 			if err == io.EOF {
+				log.Printf("End of File")
 				os.Exit(0)
 			}
 			log.Fatalf("Stdin Error: %s", err)
@@ -135,6 +162,14 @@ func tailJournal(logger *syslog.Logger, t *template.Template) {
 			}
 		}
 	}
+}
+
+func tailJournal(logger *syslog.Logger, t *template.Template) {
+	reader := systemJournalBuffer()
+	go pumpBuffer(logger, t, reader)
+	//reader = dmesgJournalBuffer()
+	//go pumpBuffer(logger, t, reader)
+
 }
 
 func main() {
